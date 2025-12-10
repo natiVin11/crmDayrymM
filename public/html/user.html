@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <title>מערכת נציג</title>
+    <link rel="stylesheet" href="../css/styles.css">
+    <script src='https://cdn.jsdelivr.net/npm/fullcalendar@6.1.10/index.global.min.js'></script>
+</head>
+<body>
+<div style="max-width: 900px; margin: 0 auto;">
+    <header style="display:flex; justify-content:space-between; align-items:center; margin-bottom:20px;">
+        <h1 id="welcomeHeader">שלום נציג</h1>
+        <button onclick="window.location.href='/html/index.html'" style="background:#ef4444; width:auto;">יציאה</button>
+    </header>
+
+    <div style="margin-bottom:20px; display:flex; gap:10px;">
+        <input type="text" id="searchInput" placeholder="חפש דייר..." style="flex:1;">
+        <button onclick="searchResidents()" style="width:auto; margin:0;">חפש</button>
+        <button onclick="openUserCalendar()" style="width:auto; margin:0; background:#f59e0b;">📅 היומן שלי</button>
+        <button onclick="loadMyBuildings()" style="width:auto; margin:0; background:#6b7280;">נקה</button>
+    </div>
+
+    <div class="card">
+        <h3>🏢 הכתובות והדיירים שלי</h3>
+        <div id="myBuildings">טוען נתונים...</div>
+    </div>
+
+    <div id="detailsModal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.5); z-index:1000; align-items:center; justify-content:center;">
+        <div style="background:white; width:90%; max-width:600px; max-height:95vh; overflow-y:auto; padding:20px; border-radius:10px; position:relative; display:flex; flex-direction:column;">
+            <div style="display:flex; justify-content:space-between; margin-bottom:15px; border-bottom:1px solid #eee; padding-bottom:10px;">
+                <h3 id="modalTitle" style="margin:0;">פרטים</h3>
+                <button onclick="document.getElementById('detailsModal').style.display='none'" style="background:#ccc; color:black; width:auto; padding:5px 10px;">X</button>
+            </div>
+            <div id="modalContent" style="flex:1;"></div>
+        </div>
+    </div>
+
+    <div id="calendarModal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.5); z-index:1000; align-items:center; justify-content:center;">
+        <div style="background:white; width:90%; max-width:800px; height:80vh; padding:20px; border-radius:10px; display:flex; flex-direction:column;">
+            <div style="display:flex; justify-content:space-between; margin-bottom:15px;">
+                <h3 style="margin:0;">📅 היומן שלי</h3>
+                <button onclick="document.getElementById('calendarModal').style.display='none'" style="background:#ccc; color:black; width:auto; padding:5px 10px;">X</button>
+            </div>
+            <div id="calendarContainer" style="flex:1;"></div>
+        </div>
+    </div>
+</div>
+<script src="../JS/user.js"></script>
+</body>
+</html>

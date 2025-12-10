@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <title>מערכת עורך דין</title>
+    <link rel="stylesheet" href="../css/styles.css">
+    <script src='https://cdn.jsdelivr.net/npm/fullcalendar@6.1.10/index.global.min.js'></script>
+</head>
+<body>
+<div style="max-width: 1100px; margin: 0 auto;">
+    <header style="display:flex; justify-content:space-between; align-items:center; margin-bottom:20px;">
+        <h1>ממשק עורך דין</h1>
+        <div style="display:flex; gap:10px;">
+            <button onclick="openLawyerCalendar()" style="background:#f59e0b; width:auto;">📅 היומן שלי</button>
+            <button onclick="window.location.href='/html/index.html'" style="background:#ef4444; width:auto;">יציאה</button>
+        </div>
+    </header>
+
+    <div id="lawyerProjects">
+        <p style="text-align:center; color:#666;">טוען נתונים...</p>
+    </div>
+
+    <div id="calendarModal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.5); z-index:1000; align-items:center; justify-content:center;">
+        <div style="background:white; width:90%; max-width:800px; height:80vh; padding:20px; border-radius:10px; display:flex; flex-direction:column;">
+            <div style="display:flex; justify-content:space-between; margin-bottom:15px;">
+                <h3 style="margin:0;">📅 יומן פגישות</h3>
+                <button onclick="document.getElementById('calendarModal').style.display='none'" style="background:#ccc; color:black; width:auto; padding:5px 10px;">X</button>
+            </div>
+            <div id="calendarContainer" style="flex:1;"></div>
+        </div>
+    </div>
+</div>
+<script src="../JS/lawyer.js"></script>
+</body>
+</html>
