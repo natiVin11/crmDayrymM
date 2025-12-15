@@ -1,279 +1,314 @@
-const urlParams = new URLSearchParams(window.location.search);
-const userId = urlParams.get('userId');
+document.addEventListener('DOMContentLoaded', () => {
+    const urlParams = new URLSearchParams(window.location.search);
+    const userId = urlParams.get('userId');
 
-// בדיקת התחברות
-if (!userId) {
-    alert('שגיאת התחברות: חסר מזהה משתמש');
-    window.location.href = '/html/index.html';
-}
+    if (!userId) { window.location.href = '/html/index.html'; return; }
 
-// טעינת הנתונים בעת טעינת הדף
-document.addEventListener('DOMContentLoaded', loadLawyerData);
+    initLawyerData(userId);
+    loadAgentsForChat();
 
-// --- פונקציה לפתיחת היומן (החלק שהיה חסר) ---
-function openLawyerCalendar() {
-    const modal = document.getElementById('calendarModal');
-    const container = document.getElementById('calendarContainer');
+    setInterval(() => {
+        if(document.getElementById('lawyerChatWindow').style.display === 'flex') {
+            loadLawyerChatHistory(userId);
+        }
+    }, 10000);
 
-    // הצגת המודאל
-    modal.style.display = 'flex';
+    const updateForm = document.getElementById('updateForm');
+    if (updateForm) updateForm.addEventListener('submit', handleFormSubmit);
 
-    // ניקוי ובנייה מחדש
-    container.innerHTML = "";
-    const calendarEl = document.createElement('div');
-    calendarEl.style.height = '100%';
-    container.appendChild(calendarEl);
+    const statusSelect = document.getElementById('editStatus');
+    if (statusSelect) statusSelect.addEventListener('change', togglePartialFields);
 
-    // טעינת היומן
-    setTimeout(() => {
-        var calendar = new FullCalendar.Calendar(calendarEl, {
-            initialView: 'dayGridMonth',
-            locale: 'he',
-            direction: 'rtl',
-            height: '100%',
-            headerToolbar: {
-                left: 'prev,next today',
-                center: 'title',
-                right: 'dayGridMonth,listWeek'
-            },
-            buttonText: {
-                today: 'היום',
-                month: 'חודש',
-                list: 'רשימה'
-            },
-            // שליפת פגישות: השרת יחזיר רק פגישות שרלוונטיות לעו"ד
-            events: `/api/meetings?role=lawyer&userId=${userId}`,
+    const blockForm = document.getElementById('blockTimeForm');
+    if (blockForm) blockForm.addEventListener('submit', async (e) => { e.preventDefault(); await handleBlockTimeSubmit(userId); });
 
-            eventClick: function(info) {
-                const p = info.event.extendedProps;
-                alert(
-                    `📌 פרטי פגישה:\n` +
-                    `----------------\n` +
-                    `📅 נושא: ${info.event.title}\n` +
-                    `👤 דייר: ${p.name || '?'}\n` +
-                    `📞 טלפון: ${p.phone || '-'}\n` +
-                    `📍 כתובת: ${p.address || '-'}\n` +
-                    `📝 הערות: ${p.note || '-'}`
-                );
-            }
-        });
-        calendar.render();
-    }, 100);
-}
+    const backBtn = document.getElementById('backBtn');
+    if(backBtn) backBtn.onclick = handleBackNavigation;
+});
 
-// --- לוגיקת טעינת מתחמים ודיירים ---
+// --- משתנים ---
+let hierarchy = {};
+let currentView = 'projects';
+let selectedProject = null;
+let selectedComplex = null;
+let currentChatTab = 'group';
 
-async function loadLawyerData() {
-    const container = document.getElementById('lawyerProjects');
-    container.innerHTML = '<p>טוען נתונים...</p>';
+// --- נתונים ורינדור ---
+async function initLawyerData(userId) {
+    const container = document.getElementById('mainContainer');
+    container.innerHTML = '<div style="text-align:center;">טוען נתונים...</div>';
 
     try {
         const res = await fetch(`/lawyer/projects?userId=${userId}`);
-        const projects = await res.json();
+        const data = await res.json();
 
-        if (projects.length === 0) {
-            container.innerHTML = '<div class="card">אין פרויקטים משויכים אליך.</div>';
-            return;
-        }
+        hierarchy = {};
+        data.forEach(group => {
+            const projName = group.project_name;
+            const compName = group.complex_name;
+            if (!hierarchy[projName]) hierarchy[projName] = {};
+            if (!hierarchy[projName][compName]) hierarchy[projName][compName] = {};
 
-        let html = '';
-
-        // לולאה על הפרויקטים/מתחמים
-        projects.forEach((p, pIndex) => {
-            // קיבוץ דיירים לפי בניינים
-            const addresses = {};
-            p.residents.forEach(r => {
-                const addrKey = r.current_address || `גוש ${r.block || ''}/חלקה ${r.parcel || ''}`;
-                if (!addresses[addrKey]) addresses[addrKey] = [];
-                addresses[addrKey].push(r);
+            group.residents.forEach(r => {
+                const addr = r.current_address || 'ללא כתובת';
+                if (!hierarchy[projName][compName][addr]) hierarchy[projName][compName][addr] = [];
+                hierarchy[projName][compName][addr].push(r);
             });
-
-            // כותרת הפרויקט
-            html += `
-            <div class="card" style="border-top: 5px solid #2563eb; margin-bottom: 30px;">
-                <h2 style="color:#1e3a8a; margin-bottom: 10px;">${p.project_name} - מתחם ${p.complex_name}</h2>
-                <div style="color:#64748b; margin-bottom: 20px;">סה"כ דיירים במתחם: ${p.residents.length}</div>
-            `;
-
-            // לולאה על הבניינים
-            Object.keys(addresses).sort().forEach((addr, aIndex) => {
-                const residents = addresses[addr];
-                const uniqueId = `collapse-${pIndex}-${aIndex}`;
-                const signedCount = residents.filter(r => r.lawyer_status && r.lawyer_status.includes('חתם')).length;
-
-                // כפתור אקורדיון לבניין
-                html += `
-                <button class="address-toggle-btn" onclick="toggleBuilding('${uniqueId}', this)" style="background-color: #f1f5f9; color: #1e293b; width: 100%; text-align: right; padding: 15px; border: 1px solid #e2e8f0; border-radius: 8px; margin-bottom: 5px; font-weight: bold; cursor: pointer; display: flex; justify-content: space-between;">
-                    <span>🏢 ${addr} <span style="font-weight:normal; font-size:0.9rem;">(${residents.length} דיירים, ${signedCount} חתמו)</span></span>
-                    <span>▼</span>
-                </button>
-                
-                <div id="${uniqueId}" class="building-container" style="display: none; padding: 10px; border: 1px solid #e2e8f0; border-top: none; background: white; margin-bottom: 15px;">
-                    <div class="table-wrapper">
-                        <table style="width:100%; border-collapse: collapse;">
-                            <thead>
-                                <tr style="background: #f8fafc;">
-                                    <th style="padding: 10px; text-align: right;">דירה</th>
-                                    <th style="padding: 10px; text-align: right;">שם הדייר</th>
-                                    <th style="padding: 10px; text-align: right;">טלפון</th>
-                                    <th style="padding: 10px; text-align: right; width: 140px;">סטטוס חתימה</th>
-                                    <th style="padding: 10px; text-align: center;">מסמכים</th>
-                                    <th style="padding: 10px; text-align: right;">צ'ק ליסט</th>
-                                    <th style="padding: 10px; text-align: right;">חוזה חתום</th>
-                                    <th style="padding: 10px; text-align: center;">פעולות</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                `;
-
-                // שורות הדיירים
-                html += residents.map(r => {
-                    const checklist = JSON.parse(r.doc_checklist || '{}');
-                    const reqDocs = ['תעודת זהות', 'נסח טאבו', 'יפוי כוח', 'אישור זכויות', 'מסמכי בנק'];
-
-                    const checklistHtml = reqDocs.map(doc => `
-                        <div style="margin-bottom: 2px; display:flex; align-items:center;">
-                            <input type="checkbox" id="chk-${r.id}-${doc}" ${checklist[doc] ? 'checked' : ''} style="width:auto; margin-left:5px;">
-                            <label for="chk-${r.id}-${doc}" style="font-size: 0.8rem; cursor:pointer;">${doc}</label>
-                        </div>
-                    `).join('');
-
-                    const rentIcon = r.is_renter === 'כן' ? '<span title="מושכר">🏠</span>' : '';
-
-                    return `
-                        <tr style="border-bottom: 1px solid #eee;">
-                            <td style="padding: 10px;">${r.sub_parcel || '-'}</td>
-                            <td style="padding: 10px; font-weight: bold;">${r.name} ${rentIcon}</td>
-                            <td style="padding: 10px;">${r.phone || '-'}</td>
-                            
-                            <td style="padding: 10px;">
-                                <select id="stat-${r.id}" style="width: 100%; padding: 5px; border-radius: 4px; border: 1px solid #ccc; font-weight:bold;">
-                                    <option value="טרם טופל" ${r.lawyer_status === 'טרם טופל' ? 'selected' : ''}>טרם טופל</option>
-                                    <option value="לא חתם" ${r.lawyer_status === 'לא חתם' ? 'selected' : ''} style="color:red;">לא חתם</option>
-                                    <option value="חתם חלקי" ${r.lawyer_status === 'חתם חלקי' ? 'selected' : ''} style="color:orange;">חתם חלקי</option>
-                                    <option value="חתם מלא" ${r.lawyer_status === 'חתם מלא' ? 'selected' : ''} style="background:#dcfce7; color:green;">חתם מלא</option>
-                                </select>
-                            </td>
-                            
-                            <td style="padding: 10px; text-align: center;">
-                                <button onclick="viewDocs(${r.id})" style="font-size: 0.8rem; padding: 4px 8px; background: #64748b; border:none; color:white; border-radius:4px; cursor:pointer;">📂</button>
-                            </td>
-                            
-                            <td style="padding: 10px;">${checklistHtml}</td>
-                            
-                            <td style="padding: 10px;">
-                                <input type="file" id="contract-${r.id}" accept=".pdf" style="width: 100%; font-size: 0.8rem;">
-                                ${r.contract_file_path ? `<div style="margin-top:4px;"><a href="/download-doc/${r.contract_file_path}" target="_blank" style="color:green; font-weight:bold; font-size:0.8rem; text-decoration:none;">📄 חוזה קיים</a></div>` : ''}
-                            </td>
-                            
-                            <td style="padding: 10px; text-align: center;">
-                                <button onclick="saveLawyerUpdate(${r.id})" style="background: #10b981; padding: 6px 12px; border:none; color:white; border-radius:4px; font-weight:bold; cursor:pointer;">💾</button>
-                            </td>
-                        </tr>
-                    `;
-                }).join('');
-
-                html += `</tbody></table></div></div>`;
-            });
-
-            html += `</div>`; // סגירת כרטיס מתחם
         });
-
-        container.innerHTML = html;
-
+        renderProjectsView();
     } catch (e) {
-        container.innerHTML = `<p style="color: red;">שגיאה בטעינת הנתונים: ${e.message}</p>`;
+        console.error(e);
+        container.innerHTML = 'שגיאה בטעינת הנתונים';
     }
 }
 
-// פונקציית פתיחה/סגירה של האקורדיון
-function toggleBuilding(elementId, btn) {
-    const el = document.getElementById(elementId);
-    if (el.style.display === 'block') {
-        el.style.display = 'none';
-        btn.querySelector('span:last-child').textContent = '▼';
-        btn.style.backgroundColor = '#f1f5f9';
-    } else {
-        el.style.display = 'block';
-        btn.querySelector('span:last-child').textContent = '▲';
-        btn.style.backgroundColor = '#e0f2fe';
+function renderProjectsView() {
+    currentView = 'projects';
+    selectedProject = null; selectedComplex = null;
+    document.getElementById('navBar').style.display = 'none';
+    const container = document.getElementById('mainContainer');
+    const projects = Object.keys(hierarchy);
+    if(projects.length === 0) { container.innerHTML = '<div style="text-align:center;">אין פרויקטים.</div>'; return; }
+
+    container.innerHTML = projects.map(p => `
+        <div class="card" onclick="renderComplexesView('${p}')" style="cursor:pointer; border-right: 5px solid var(--primary);">
+            <h3>📁 פרויקט: ${p}</h3>
+            <div style="color:#64748b;">${Object.keys(hierarchy[p]).length} מתחמים</div>
+        </div>
+    `).join('');
+}
+
+function renderComplexesView(pName) {
+    currentView = 'complexes'; selectedProject = pName;
+    document.getElementById('navBar').style.display = 'flex';
+    document.getElementById('navTitle').innerText = `פרויקט ${pName}`;
+    const container = document.getElementById('mainContainer');
+    container.innerHTML = Object.keys(hierarchy[pName]).map(c => `
+        <div class="card" onclick="renderBuildingsView('${c}')" style="cursor:pointer; border-right: 5px solid var(--accent);">
+            <h3>🏢 מתחם: ${c}</h3>
+            <div style="color:#64748b;">${Object.keys(hierarchy[pName][c]).length} בניינים</div>
+        </div>
+    `).join('');
+}
+
+function renderBuildingsView(cName) {
+    currentView = 'buildings'; selectedComplex = cName;
+    document.getElementById('navTitle').innerText = `${selectedProject} > ${cName}`;
+    const container = document.getElementById('mainContainer');
+    const addresses = Object.keys(hierarchy[selectedProject][cName]);
+
+    container.innerHTML = addresses.map(addr => {
+        const count = hierarchy[selectedProject][cName][addr].length;
+        const signed = hierarchy[selectedProject][cName][addr].filter(r => r.lawyer_status === 'חתם מלא').length;
+        const pct = count > 0 ? Math.round((signed/count)*100) : 0;
+        return `
+        <div class="card" onclick="renderResidentsView('${addr}')" style="cursor:pointer;">
+            <h3>📍 ${addr}</h3>
+            <div style="margin-bottom:5px;">${count} דיירים (${pct}% חתמו)</div>
+            <div class="progress-bg"><div class="progress-fill gold" style="width:${pct}%"></div></div>
+        </div>`;
+    }).join('');
+}
+
+function renderResidentsView(addr) {
+    currentView = 'residents';
+    document.getElementById('navTitle').innerText = `${selectedComplex} > ${addr}`;
+    const container = document.getElementById('mainContainer');
+    const residents = hierarchy[selectedProject][selectedComplex][addr];
+    residents.sort((a,b) => (parseInt(a.sub_parcel)||0) - (parseInt(b.sub_parcel)||0));
+
+    let html = `<div class="table-wrapper" style="grid-column: 1/-1;"><table><thead><tr><th>דירה</th><th>דייר</th><th>סטטוס</th><th>פעולות</th></tr></thead><tbody>`;
+    html += residents.map(r => {
+        let cls = 'status-none';
+        if (r.lawyer_status === 'חתם מלא') cls = 'status-signed';
+        else if (r.lawyer_status === 'חתם חלקי') cls = 'status-partial';
+        else if (r.lawyer_status === 'בתהליך חתימה') cls = 'bg-orange';
+        return `<tr><td>${r.sub_parcel}</td><td><b>${r.name}</b><br><small>${r.id_number||''}</small></td><td><span class="status-badge ${cls}">${r.lawyer_status||'טרם טופל'}</span></td><td><button class="btn-edit" onclick='openUpdateModal(${JSON.stringify(r).replace(/'/g, "&#39;")})'>✏️ עדכן</button></td></tr>`;
+    }).join('');
+    html += `</tbody></table></div>`;
+    container.innerHTML = html;
+}
+
+function handleBackNavigation() {
+    if (currentView === 'residents') renderBuildingsView(selectedComplex);
+    else if (currentView === 'buildings') renderComplexesView(selectedProject);
+    else if (currentView === 'complexes') renderProjectsView();
+}
+
+// --- מודאל עדכון (V = התקבל/קיים) ---
+
+window.openUpdateModal = function(r) {
+    document.getElementById('editId').value = r.id;
+    document.getElementById('editStatus').value = r.lawyer_status || 'טרם טופל';
+
+    // יצירת צ'קבוקסים
+    let owners = [{ name: r.name, id: 'main' }];
+    if (r.secondary_owners) r.secondary_owners.forEach((so, i) => owners.push({ name: so.name, id: `sec_${i}` }));
+
+    document.getElementById('ownersCheckboxes').innerHTML = owners.map(o =>
+        `<div class="checkbox-item"><input type="checkbox" name="missing_owner" value="${o.name}" id="mo_${o.id}"><label for="mo_${o.id}">${o.name}</label></div>`
+    ).join('');
+
+    // --- מצב התחלתי: הכל מסומן ב-V (הנחה שהכל קיים) ---
+    // העורך דין יסיר את ה-V ממה שחסר.
+    document.querySelectorAll('#updateModal input[type="checkbox"]').forEach(cb => cb.checked = true);
+    document.getElementById('signedDocs').value = '';
+
+    // --- טעינת חוסרים קודמים ---
+    // אם משהו שמור ב-DB כחסר -> נסיר לו את ה-V
+    if (r.missing_docs_json) {
+        try {
+            const missing = JSON.parse(r.missing_docs_json);
+
+            if(missing.owners) {
+                missing.owners.forEach(name => {
+                    const el = document.querySelector(`input[name="missing_owner"][value="${name}"]`);
+                    if(el) el.checked = false; // מסירים V כי זה חסר
+                });
+            }
+            if(missing.docs) {
+                missing.docs.forEach(docName => {
+                    const el = document.querySelector(`input[name="missing_doc"][value="${docName}"]`);
+                    if(el) el.checked = false; // מסירים V כי זה חסר
+                });
+            }
+        } catch(e){}
     }
-}
 
-// פונקציה להצגת מסמכים
-async function viewDocs(residentId) {
-    try {
-        const res = await fetch(`/resident-docs/${residentId}`);
-        const docs = await res.json();
+    togglePartialFields();
+    document.getElementById('updateModal').style.display = 'flex';
+};
 
-        let content = '';
-        if (docs.length === 0) content = '<p style="text-align:center; color:#666;">לא הועלו מסמכים.</p>';
-        else {
-            content = '<ul style="list-style: none; padding: 0;">';
-            docs.forEach(d => {
-                const date = new Date(d.upload_date).toLocaleDateString('he-IL');
-                content += `<li style="margin-bottom: 10px; border-bottom: 1px solid #eee; padding-bottom: 5px;">
-                    <a href="/download-doc/${d.file_path}" target="_blank" style="font-weight: bold; color: #2563eb; text-decoration: none;">📄 ${d.doc_type}</a>
-                    <div style="font-size:0.8rem; color:#666;">${date} (הועלה ע"י ${d.uploaded_by_role === 'user' ? 'נציג' : 'עו"ד'})</div>
-                </li>`;
-            });
-            content += '</ul>';
-        }
+window.togglePartialFields = function() {
+    document.getElementById('partialSection').style.display =
+        document.getElementById('editStatus').value === 'חתם חלקי' ? 'block' : 'none';
+};
 
-        const win = window.open("", "Docs", "width=450,height=500,scrollbars=yes");
-        win.document.write(`<html dir="rtl"><body style="font-family:sans-serif;padding:20px;"><h3>📂 מסמכים לדייר</h3>${content}</body></html>`);
-    } catch (e) { alert('שגיאה בטעינת מסמכים'); }
-}
+async function handleFormSubmit(e) {
+    e.preventDefault();
+    const id = document.getElementById('editId').value;
+    const status = document.getElementById('editStatus').value;
+    const files = document.getElementById('signedDocs').files;
 
-// פונקציית שמירה
-async function saveLawyerUpdate(id) {
-    const status = document.getElementById(`stat-${id}`).value;
-    const checklist = {};
-    ['תעודת זהות', 'נסח טאבו', 'יפוי כוח', 'אישור זכויות', 'מסמכי בנק'].forEach(doc => {
-        const cb = document.getElementById(`chk-${id}-${doc}`);
-        if(cb) checklist[doc] = cb.checked;
-    });
+    // --- איסוף חוסרים (מה שלא מסומן ב-V) ---
+    let missing = { owners:[], docs:[] };
 
-    try {
-        // 1. העלאת חוזה אם נבחר
-        const contractInput = document.getElementById(`contract-${id}`);
-        if (contractInput && contractInput.files.length > 0) {
-            const formData = new FormData();
-            formData.append('contract', contractInput.files[0]);
-            formData.append('resident_id', id);
-            const uploadRes = await fetch('/upload-contract', { method: 'POST', body: formData });
-            if (!uploadRes.ok) throw new Error('שגיאה בהעלאת החוזה');
-        }
-
-        // 2. שמירת הנתונים
-        const res = await fetch('/lawyer/update-resident', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({
-                id: id,
-                lawyer_status: status,
-                doc_checklist: JSON.stringify(checklist),
-                userId: userId
-            })
+    if (status === 'חתם חלקי') {
+        // מי שלא מסומן (checked = false) -> נכנס לרשימת החוסרים
+        document.querySelectorAll('input[name="missing_owner"]').forEach(cb => {
+            if (!cb.checked) missing.owners.push(cb.value);
         });
-
-        if (res.ok) {
-            const btn = document.querySelector(`button[onclick="saveLawyerUpdate(${id})"]`);
-            const oldText = btn.innerText;
-            btn.style.background = '#059669';
-            btn.innerText = '✔';
-
-            setTimeout(() => {
-                btn.style.background = '#10b981';
-                btn.innerText = oldText;
-                // אופציונלי: רענון חלקי או הודעה שחוזה עודכן
-                if (contractInput && contractInput.files.length > 0) loadLawyerData();
-            }, 1000);
-        } else {
-            alert('שגיאה בשמירת הנתונים.');
-        }
-
-    } catch (e) {
-        alert('תקלה: ' + e.message);
+        document.querySelectorAll('input[name="missing_doc"]').forEach(cb => {
+            if (!cb.checked) missing.docs.push(cb.value);
+        });
     }
+
+    const fd = new FormData();
+    fd.append('id', id);
+    fd.append('lawyer_status', status);
+    fd.append('missing_docs_json', JSON.stringify(missing));
+    for(let f of files) fd.append('signed_docs', f);
+
+    const btn = e.target.querySelector('button[type="submit"]');
+    btn.innerText = 'שומר...'; btn.disabled = true;
+
+    try {
+        await fetch('/lawyer/update-resident', { method: 'POST', body: fd });
+        document.getElementById('updateModal').style.display = 'none';
+        const userId = new URLSearchParams(window.location.search).get('userId');
+        initLawyerData(userId);
+
+        if (currentView === 'residents') {
+            renderResidentsView(Object.keys(hierarchy[selectedProject][selectedComplex]).find(addr =>
+                hierarchy[selectedProject][selectedComplex][addr].some(r => r.id == id)
+            ));
+        }
+    } catch(e) { alert('שגיאה'); }
+    finally { btn.innerText = 'שמור ועדכן'; btn.disabled = false; }
+}
+
+// --- צ'אט ---
+window.switchChatTab = function(tab) {
+    currentChatTab = tab;
+    document.getElementById('tabGroup').classList.toggle('active', tab==='group');
+    document.getElementById('tabPrivate').classList.toggle('active', tab==='private');
+    const sel = document.getElementById('chatRecipient');
+    if (tab === 'group') sel.value = 'all'; else if (sel.options.length>1) sel.selectedIndex=1;
+    loadLawyerChatHistory(new URLSearchParams(window.location.search).get('userId'));
+};
+
+function toggleLawyerChat() {
+    const win = document.getElementById('lawyerChatWindow');
+    if (win.style.display === 'flex') win.style.display = 'none';
+    else { win.style.display = 'flex'; loadLawyerChatHistory(new URLSearchParams(window.location.search).get('userId')); }
+}
+
+async function loadAgentsForChat() {
+    try {
+        const res = await fetch('/api/staff/users');
+        const users = await res.json();
+        const sel = document.getElementById('chatRecipient');
+        sel.innerHTML = '<option value="all">📢 שלח לכולם</option>';
+        users.forEach(u => {
+            if (u.role !== 'lawyer') {
+                const opt = document.createElement('option'); opt.value = u.id; opt.innerText = `${u.username} (${u.role})`; sel.appendChild(opt);
+            }
+        });
+    } catch(e){}
+}
+
+async function loadLawyerChatHistory(userId) {
+    const container = document.getElementById('lawyerChatBody');
+    if(!container) return;
+    try {
+        const res = await fetch(`/api/staff/history?userId=${userId}`);
+        const all = await res.json();
+        const filtered = all.filter(m => {
+            const rId = parseInt(m.recipient_id), sId = parseInt(m.sender_id), myId = parseInt(userId);
+            return currentChatTab === 'group' ? (rId === 0) : ((rId === myId) || (sId === myId && rId !== 0));
+        });
+        container.innerHTML = filtered.map(m => {
+            const isMe = m.sender_id == userId, cls = isMe ? 'mine' : 'others';
+            let fileHtml = m.file_path ? `<a href="/staff-files/${m.file_path}" target="_blank" class="staff-file-link">📎 ${m.file_name||'קובץ'}</a>` : '';
+            return `<div class="staff-msg ${cls}"><small>${m.sender_name}</small><div>${m.message}</div>${fileHtml}</div>`;
+        }).join('');
+        container.scrollTop = container.scrollHeight;
+    } catch(e){}
+}
+
+async function sendLawyerMessage() {
+    const userId = new URLSearchParams(window.location.search).get('userId');
+    const msg = document.getElementById('chatMsg').value;
+    const recipient = document.getElementById('chatRecipient').value;
+    const file = document.getElementById('chatFile').files[0];
+    if(!msg && !file) return;
+
+    const fd = new FormData();
+    fd.append('sender_id', userId); fd.append('recipient_id', recipient); fd.append('message', msg);
+    if(file) fd.append('file', file);
+
+    await fetch('/api/staff/send', { method: 'POST', body: fd });
+    document.getElementById('chatMsg').value = ''; document.getElementById('chatFile').value = '';
+    loadLawyerChatHistory(userId);
+}
+
+// --- יומן ---
+window.openLawyerCalendar = function() {
+    document.getElementById('calendarModal').style.display = 'flex';
+    setTimeout(() => {
+        const el = document.getElementById('calendarContainer'); el.innerHTML = '';
+        new FullCalendar.Calendar(el, {
+            initialView: 'dayGridMonth', locale: 'he', direction: 'rtl', height: '100%',
+            events: `/api/tasks?userId=${new URLSearchParams(window.location.search).get('userId')}`,
+            eventDidMount: function(info) { if (info.event.extendedProps.type === 'blocked') { info.el.style.backgroundColor = '#ef4444'; info.el.style.borderColor = '#ef4444'; } }
+        }).render();
+    }, 200);
+};
+
+async function handleBlockTimeSubmit(userId) {
+    const date = document.getElementById('blockDate').value;
+    const reason = document.getElementById('blockReason').value;
+    if(!date) return alert('חובה לבחור תאריך');
+    await fetch('/api/lawyer/block-time', { method: 'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ user_id: userId, start_time: date, reason }) });
+    alert('נחסם'); document.getElementById('blockTimeModal').style.display = 'none'; openLawyerCalendar();
 }
