@@ -1,351 +1,640 @@
 const urlParams = new URLSearchParams(window.location.search);
 const userId = urlParams.get('userId');
 
-// בדיקת התחברות
-if (!userId) {
-    alert('שגיאת התחברות: חסר מזהה משתמש');
-    window.location.href = '/html/index.html';
-}
+// הפניה לדף כניסה אם אין מזהה משתמש
+if (!userId) location.href = '/html/index.html';
 
-// משתנים גלובליים
-let currentProject = null;
-let currentAddress = null;
-let allAgents = [];
+let allBuildings = [], groupedComplexes = {}, currentView = 'complexes', currentComplex = null, currentAddress = null, currentProject = null;
 
-document.addEventListener('DOMContentLoaded', async () => {
-    // טעינת שם משתמש
-    const storedUser = localStorage.getItem('user');
-    if (storedUser) {
-        const user = JSON.parse(storedUser);
-        const header = document.getElementById('welcomeHeader');
-        if(header) header.textContent = `שלום, ${user.username}`;
+// משתנה גלובלי לניהול הצ'אט (מול הדייר)
+window.currentResidentIdForChat = null;
+
+document.addEventListener('DOMContentLoaded', () => {
+    initData();
+
+    // --- אתחול צ'אט צוות מרחף ---
+    loadStaffUsers();
+
+    // רענון אוטומטי לצ'אט הצוות (כל 10 שניות, רק אם החלון פתוח)
+    setInterval(() => {
+        const chatWin = document.getElementById('staffChatWindow');
+        if (chatWin && chatWin.style.display === 'flex') {
+            loadStaffChatHistory();
+        }
+    }, 10000);
+
+    // כפתור חזור
+    const backBtn = document.getElementById('backBtn');
+    if(backBtn) {
+        backBtn.onclick = () => {
+            if(currentView === 'buildings') renderComplexes();
+            else if(currentView === 'residents') renderBuildings(currentComplex);
+        };
     }
 
-    // טעינת רשימת נציגים (להעברת טיפול)
-    try {
-        const res = await fetch('/users');
-        const users = await res.json();
-        allAgents = users.filter(u => u.role === 'user');
-    } catch(e) {}
+    // שליחת טופס שמירת דייר
+    const editForm = document.getElementById('editForm');
+    if(editForm) {
+        editForm.onsubmit = async (e) => {
+            e.preventDefault();
+            await saveResident();
+        };
+    }
 
-    loadMyBuildings();
+    // --- מאזינים לשינויים בטופס (לוגיקה דינמית) ---
+
+    // 1. סטטוס שוטף -> פגישה
+    const statusSelect = document.getElementById('editStatus');
+    if (statusSelect) {
+        statusSelect.onchange = (e) => {
+            document.getElementById('meetingDiv').style.display = e.target.value === 'נקבעה פגישה' ? 'block' : 'none';
+        };
+    }
+
+    // 2. סטטוס ייצוג -> סירוב/חוסרים
+    const repSelect = document.getElementById('editRepresentationStatus');
+    if (repSelect) {
+        repSelect.onchange = (e) => {
+            document.getElementById('refusalReasonDiv').style.display = e.target.value === 'סרבן' ? 'block' : 'none';
+            document.getElementById('unsignedOwnersDiv').style.display = e.target.value === 'חתם חלקי' ? 'block' : 'none';
+        };
+    }
+
+    // 3. מושכר -> פרטי שוכר
+    const renterSelect = document.getElementById('editIsRenter');
+    if (renterSelect) {
+        renterSelect.addEventListener('change', (e) => {
+            const div = document.getElementById('tenantDetailsDiv');
+            if (div) div.style.display = e.target.value === 'כן' ? 'block' : 'none';
+        });
+    }
 });
 
-// --- פונקציות יומן ---
+// --- טעינת נתונים ראשונית ---
+async function initData() {
+    try {
+        const res = await fetch(`/my-buildings?userId=${userId}`);
+        allBuildings = await res.json();
+
+        // קיבוץ לפי מתחמים
+        groupedComplexes = allBuildings.reduce((acc, item) => {
+            const c = item.complex_name || 'כללי';
+            if(!acc[c]) acc[c]=[];
+            acc[c].push(item);
+            return acc;
+        }, {});
+
+        renderComplexes();
+    } catch(e) {
+        console.error(e);
+        const main = document.getElementById('mainContent');
+        if(main) main.innerHTML = '<p style="text-align:center;">שגיאה בטעינת נתונים</p>';
+    }
+}
+
+// --- רינדור תצוגות (מתחמים/בניינים/דיירים) ---
+
+function renderComplexes() {
+    currentView = 'complexes';
+    document.getElementById('navBar').style.display = 'none';
+    document.getElementById('complexHeader').style.display = 'none';
+
+    const container = document.getElementById('mainContent');
+
+    if (Object.keys(groupedComplexes).length === 0) {
+        container.innerHTML = '<p style="text-align:center;">אין פרויקטים משוייכים.</p>';
+        return;
+    }
+
+    container.innerHTML = Object.keys(groupedComplexes).map(c => `
+        <div class="card" onclick="renderBuildings('${c}')" style="cursor:pointer;">
+            <h3>🏢 מתחם ${c}</h3>
+            <div style="color:var(--text-muted);">${groupedComplexes[c].length} בניינים</div>
+        </div>
+    `).join('');
+}
+
+async function renderBuildings(cName) {
+    currentView = 'buildings';
+    currentComplex = cName;
+
+    document.getElementById('navBar').style.display = 'flex';
+    document.getElementById('navTitle').innerText = cName;
+
+    const container = document.getElementById('mainContent');
+    const sample = groupedComplexes[cName][0];
+    currentProject = sample.project_name;
+
+    // הצגת כותרת מתחם
+    const header = document.getElementById('complexHeader');
+    header.style.display = 'block';
+
+    // איפוס נתונים בזמן טעינה
+    document.getElementById('infoLawyer').innerText = 'טוען...';
+    document.getElementById('infoConference').innerText = 'טוען...';
+    document.getElementById('infoProtocol').innerText = 'טוען...';
+
+    // משיכת נתוני מטא של המתחם
+    try {
+        const metaRes = await fetch(`/api/complex-details?project=${encodeURIComponent(currentProject)}&complex=${encodeURIComponent(cName)}`);
+        const meta = await metaRes.json();
+
+        document.getElementById('infoLawyer').innerText = meta.lawyerName || 'לא הוקצה';
+
+        if (meta.conference_date) {
+            const d = new Date(meta.conference_date);
+            document.getElementById('infoConference').innerText = `${d.getDate()}/${d.getMonth()+1}/${d.getFullYear()} (${meta.conference_name})`;
+        } else {
+            document.getElementById('infoConference').innerText = 'לא נקבע';
+        }
+
+        if (meta.protocol_path) {
+            document.getElementById('infoProtocol').innerHTML = `<a href="/download-complex-file/protocol/${meta.protocol_path}" target="_blank" style="color:var(--accent);">הורד קובץ</a>`;
+        } else {
+            document.getElementById('infoProtocol').innerText = 'אין';
+        }
+
+    } catch(e) { console.error(e); }
+
+    // רינדור רשימת הבניינים
+    container.innerHTML = groupedComplexes[cName].map(b => `
+        <div class="card" onclick="showResidents('${b.project_name}', '${b.address}')" style="cursor:pointer; border-right: 4px solid var(--accent);">
+            <h3>📍 ${b.address}</h3>
+            <div style="margin-bottom:5px;">${b.stats.full_pct}% חתומים</div>
+            <div class="progress-bg">
+                <div class="progress-fill gold" style="width:${b.stats.full_pct}%;"></div>
+            </div>
+        </div>
+    `).join('');
+}
+
+async function showResidents(proj, addr) {
+    currentView = 'residents';
+    currentAddress = addr;
+
+    document.getElementById('navTitle').innerText = addr;
+    const container = document.getElementById('mainContent');
+    container.innerHTML = '<p style="text-align:center;">טוען דיירים...</p>';
+
+    try {
+        const res = await fetch(`/residents-by-address?project=${encodeURIComponent(proj)}&address=${encodeURIComponent(addr)}`);
+        const residents = await res.json();
+
+        // מיון לפי מספר דירה
+        residents.sort((a,b) => (parseInt(a.sub_parcel)||999)-(parseInt(b.sub_parcel)||999));
+
+        // הבאת בעלים נוספים
+        const enriched = await Promise.all(residents.map(async r => {
+            try {
+                const sec = await fetch(`/api/secondary-owners/${r.id}`).then(res=>res.json());
+                return {...r, secondary: sec};
+            } catch(e) { return {...r, secondary: []}; }
+        }));
+
+        container.innerHTML = enriched.map(r => {
+            // חישוב סטטוסים לתצוגה
+            let isSignedContract = r.lawyer_status === 'חתם מלא' || r.status === 'חתם חוזה';
+            let isPartial = r.lawyer_status === 'חתם חלקי';
+
+            let cls = isSignedContract ? 'status-signed' : (isPartial ? 'status-partial' : (r.status==='סרבן'?'status-none':'bg-gray'));
+            let statusText = isSignedContract ? 'חתם חוזה' : (isPartial ? 'חסרים מסמכים' : (r.status || 'חדש'));
+
+            // רשימת בעלים
+            let ownersHtml = `<div>1. <b>${r.name}</b> ${r.id_number?`<small>(${r.id_number})</small>`:''}</div>`;
+            if (r.secondary && r.secondary.length > 0) {
+                ownersHtml += r.secondary.map((s, i) => `<div style="font-size:0.9em; color:#555;">${i+2}. ${s.name}</div>`).join('');
+            }
+
+            // הצגת הערת אזהרה בכרטיס הראשי (אם יש)
+            let warningHtml = (r.warning_note && r.warning_note !== 'לא' && r.warning_note.trim() !== '')
+                ? `<div style="color:#dc2626; font-size:0.85rem; margin-top:5px; font-weight:bold;">⚠️ הערת אזהרה: ${r.warning_note}</div>`
+                : '';
+
+            // אייקון מנעול אם חתם
+            let lockIcon = isSignedContract ? '🔒' : '';
+
+            return `
+            <div class="card resident-list-item" onclick='openEdit(${JSON.stringify(r).replace(/'/g,"&#39;")})'>
+                <div style="display:flex; justify-content:space-between; align-items:flex-start;">
+                    <div>
+                        <span style="background:#e0f2fe; color:#0369a1; padding:2px 6px; border-radius:4px; font-size:0.8rem; font-weight:bold;">דירה ${r.sub_parcel}</span>
+                        <div style="margin-top:8px;">${ownersHtml}</div>
+                        ${warningHtml}
+                    </div>
+                    <div style="text-align:left;">
+                        <span class="status-badge ${cls}">${lockIcon} ${statusText}</span>
+                    </div>
+                </div>
+            </div>`;
+        }).join('');
+    } catch(e) {
+        console.error(e);
+        container.innerHTML = '<p style="text-align:center;">שגיאה בטעינת דיירים</p>';
+    }
+}
+
+// --- פתיחת כרטיס דייר (עריכה) ---
+async function openEdit(r) {
+    const set = (id, val) => {
+        const el = document.getElementById(id);
+        if(el) el.value = val || '';
+    };
+
+    // מילוי שדות בסיסיים
+    set('editId', r.id);
+    set('editPhone', r.phone);
+    set('editIdNum', r.id_number);
+    set('editStatus', r.status);
+    set('editRepresentationStatus', r.representation_status || 'טרם חתם');
+    set('editRefusalReason', r.representation_refusal_reason);
+    set('editUnsignedOwners', r.unsigned_owners);
+    set('editNote', r.note);
+    set('editActualAddress', r.actual_address);
+    // הערה: warning_note לא נטען לשדה עריכה כי זה קריאה בלבד
+
+    // --- טיפול בהערת אזהרה (קריאה בלבד) ---
+    const warningDiv = document.getElementById('warningDisplay');
+    if (r.warning_note && r.warning_note !== 'לא' && r.warning_note.trim() !== '') {
+        if(warningDiv) {
+            warningDiv.style.display = 'block';
+            warningDiv.innerText = `⚠️ הערת אזהרה: ${r.warning_note}`;
+        }
+    } else {
+        if(warningDiv) warningDiv.style.display = 'none';
+    }
+
+    // --- טיפול בשוכרים ---
+    set('editIsRenter', r.is_renter || 'לא');
+    set('editTenantName', r.tenant_name || '');
+    set('editTenantPhone', r.tenant_phone || '');
+
+    const tenantDiv = document.getElementById('tenantDetailsDiv');
+    if (tenantDiv) {
+        tenantDiv.style.display = (r.is_renter === 'כן') ? 'block' : 'none';
+    }
+
+    // הצגת רשימת בעלים יפה
+    let ownersText = `1. ${r.name} (${r.id_number||'-'})`;
+    if (r.secondary && r.secondary.length > 0) {
+        ownersText += '<br>' + r.secondary.map((s, i) => `${i+2}. ${s.name} (${s.id_number||'-'})`).join('<br>');
+    }
+    document.getElementById('ownersListDisplay').innerHTML = ownersText;
+
+    // --- לוגיקת נעילה (חלק קריטי) ---
+    const isLocked = (r.lawyer_status === 'חתם מלא') || (r.status === 'חתם חוזה');
+    const lockedMsg = document.getElementById('lockedMsg');
+    const saveBtn = document.getElementById('saveBtn');
+    const formInputs = document.querySelectorAll('#editForm input, #editForm select, #editForm textarea');
+
+    if (isLocked) {
+        // מצב נעול
+        if(lockedMsg) lockedMsg.style.display = 'block';
+        if(saveBtn) saveBtn.style.display = 'none';
+        formInputs.forEach(input => { input.disabled = true; input.style.opacity = '0.7'; });
+    } else {
+        // מצב פתוח לעריכה
+        if(lockedMsg) lockedMsg.style.display = 'none';
+        if(saveBtn) saveBtn.style.display = 'block';
+        formInputs.forEach(input => { input.disabled = false; input.style.opacity = '1'; });
+    }
+
+    // ניהול תצוגת שדות דינמיים (רק אם לא נעול)
+    const meetingDiv = document.getElementById('meetingDiv');
+    const refusalDiv = document.getElementById('refusalReasonDiv');
+    const unsignedDiv = document.getElementById('unsignedOwnersDiv');
+
+    if(meetingDiv) meetingDiv.style.display = r.status==='נקבעה פגישה'?'block':'none';
+    if(refusalDiv) refusalDiv.style.display = r.representation_status==='סרבן'?'block':'none';
+    if(unsignedDiv) unsignedDiv.style.display = r.representation_status==='חתם חלקי'?'block':'none';
+
+    // --- מסמכים חסרים + צ'אט ---
+
+    // לוגיקה: מה שהעורך דין *לא* סימן, נחשב חסר ונשמר ב-DB כחסר.
+    // כאן אנחנו רק מציגים את מה שנשמר ב-missing_docs_json.
+    handleMissingDocsUI(r);
+
+    window.currentResidentIdForChat = r.id;
+    loadChatHistory(r.id); // טעינת צ'אט בוט
+
+    document.getElementById('editModal').style.display = 'flex';
+}
+
+// --- שמירת דייר ---
+async function saveResident() {
+    const id = document.getElementById('editId').value;
+    const status = document.getElementById('editStatus').value;
+    const date = document.getElementById('editDate').value;
+
+    if(status === 'נקבעה פגישה' && !date) {
+        alert('חובה להזין תאריך לפגישה');
+        return;
+    }
+
+    const btn = document.getElementById('saveBtn');
+    btn.innerText = 'שומר...';
+    btn.disabled = true;
+
+    try {
+        // איסוף נתונים (כולל שוכר)
+        const payload = {
+            id, status,
+            phone: document.getElementById('editPhone').value,
+            id_number: document.getElementById('editIdNum').value,
+            note: document.getElementById('editNote').value,
+
+            // שוכר
+            is_renter: document.getElementById('editIsRenter').value,
+            tenant_name: document.getElementById('editTenantName') ? document.getElementById('editTenantName').value : '',
+            tenant_phone: document.getElementById('editTenantPhone') ? document.getElementById('editTenantPhone').value : '',
+
+            actual_address: document.getElementById('editActualAddress').value,
+            representation_status: document.getElementById('editRepresentationStatus').value,
+            representation_refusal_reason: document.getElementById('editRefusalReason').value,
+            unsigned_owners: document.getElementById('editUnsignedOwners').value,
+
+            // שים לב: warning_note לא נשלח כי הוא קריאה בלבד!
+        };
+
+        // שמירה לשרת
+        await fetch('/update-resident-data', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(payload)
+        });
+
+        // יצירת פגישה אם צריך
+        if(status === 'נקבעה פגישה') {
+            await fetch('/api/add-task', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    resident_id: id,
+                    user_id: userId,
+                    title: `פגישה (${document.getElementById('meetingType').value})`,
+                    due_date: date,
+                    meeting_type: document.getElementById('meetingType').value
+                })
+            });
+        }
+
+        document.getElementById('editModal').style.display = 'none';
+
+        // רענון רשימה
+        if(currentProject && currentAddress) {
+            showResidents(currentProject, currentAddress);
+        } else {
+            renderComplexes();
+        }
+
+    } catch(e) {
+        alert('שגיאה בשמירה');
+        console.error(e);
+    } finally {
+        btn.innerText = 'שמור שינויים';
+        btn.disabled = false;
+    }
+}
+
+// --- מסמכים חסרים (מוצג לנציג) ---
+function handleMissingDocsUI(r) {
+    const container = document.getElementById('missingDocsContainer');
+    const list = document.getElementById('missingDocsList');
+
+    // אם העורך דין סימן ב'חתם חלקי', המערכת שמרה ב-DB את מה ש*חסר*.
+    if (r.lawyer_status === 'חתם חלקי' && r.missing_docs_json) {
+        try {
+            const missing = JSON.parse(r.missing_docs_json);
+            let hasItems = false;
+            let html = '';
+
+            // רשימת מסמכים שחסרים
+            if (missing.docs && missing.docs.length > 0) {
+                hasItems = true;
+                missing.docs.forEach(docName => {
+                    html += `
+                    <div class="missing-item-row">
+                        <span>📄 <b>חסר:</b> ${docName}</span>
+                        <label class="upload-btn-mini">
+                            העלה קובץ
+                            <input type="file" style="display:none;" onchange="uploadSpecificDoc(this, '${docName}', ${r.id})">
+                        </label>
+                    </div>`;
+                });
+            }
+
+            // רשימת בעלים שלא חתמו
+            if (missing.owners && missing.owners.length > 0) {
+                hasItems = true;
+                html += `<div style="margin-top:10px; font-size:0.9rem; color:#991b1b;">
+                    <b>דיירים שטרם חתמו:</b> ${missing.owners.join(', ')}
+                </div>`;
+            }
+
+            if (hasItems) {
+                container.style.display = 'block';
+                list.innerHTML = html;
+            } else { container.style.display = 'none'; }
+
+        } catch (e) { container.style.display = 'none'; }
+    } else { container.style.display = 'none'; }
+}
+
+// העלאת קובץ ספציפי
+async function uploadSpecificDoc(input, docType, residentId) {
+    if (!input.files[0]) return;
+    const fd = new FormData();
+    fd.append('doc', input.files[0]);
+    fd.append('resident_id', residentId);
+    fd.append('doc_type', docType);
+    fd.append('uploaded_by_role', 'agent');
+
+    const label = input.parentElement;
+    const originalText = label.innerText;
+    label.innerText = 'מעלה...';
+
+    try {
+        const res = await fetch('/upload-resident-doc', { method: 'POST', body: fd });
+        if (res.ok) {
+            label.innerText = '✅ הועלה!';
+            label.style.background = '#10b981';
+
+            // עדכון אוטומטי בצ'אט בוט שהקובץ הועלה
+            await fetch('/api/chat/send', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    resident_id: residentId,
+                    message: `העלאת קובץ חסר: ${docType}`,
+                    sender_name: 'מערכת'
+                })
+            });
+            loadChatHistory(residentId); // רענון היסטוריית הצ'אט
+        } else {
+            alert('שגיאה בהעלאה');
+            label.innerText = originalText;
+        }
+    } catch (e) { alert('תקלה בתקשורת'); label.innerText = originalText; }
+}
+
+// --- צ'אט בוט (בתוך כרטיס דייר) ---
+async function loadChatHistory(residentId) {
+    const chatBox = document.getElementById('chatMessages');
+    chatBox.innerHTML = '<div style="text-align:center; color:#aaa;">טוען הודעות...</div>';
+
+    try {
+        const res = await fetch(`/api/chat/history/${residentId}`);
+        const messages = await res.json();
+
+        if (messages.length === 0) {
+            chatBox.innerHTML = '<div style="text-align:center; color:#aaa; margin-top:20px;">אין הודעות עדיין.</div>';
+            return;
+        }
+
+        chatBox.innerHTML = messages.map(m => {
+            const isMe = m.sender_name === 'נציג' || m.sender_name === 'מערכת';
+            const cls = isMe ? 'msg-outgoing' : 'msg-incoming';
+            const date = new Date(m.timestamp).toLocaleString('he-IL', {hour:'2-digit', minute:'2-digit', day:'2-digit', month:'2-digit'});
+
+            return `
+            <div class="message-bubble ${cls}">
+                <div>${m.message}</div>
+                <div class="msg-meta">
+                    <span>${m.sender_name || 'אנונימי'}</span>
+                    <span>${date}</span>
+                </div>
+            </div>`;
+        }).join('');
+        chatBox.scrollTop = chatBox.scrollHeight;
+    } catch (e) { chatBox.innerHTML = 'שגיאה בטעינת צ\'אט'; }
+}
+
+async function sendChatMessage() {
+    const input = document.getElementById('chatInput');
+    const message = input.value.trim();
+    if (!message) return;
+    if (!window.currentResidentIdForChat) return;
+
+    input.value = '';
+
+    try {
+        await fetch('/api/chat/send', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                resident_id: window.currentResidentIdForChat,
+                message: message,
+                sender_name: 'נציג'
+            })
+        });
+        loadChatHistory(window.currentResidentIdForChat);
+    } catch (e) { alert('שגיאה בשליחת הודעה'); }
+}
+
+// --- צ'אט צוות מרחף (Floating Staff Chat) ---
+
+// 1. פתיחה/סגירה
+function toggleStaffChat() {
+    const win = document.getElementById('staffChatWindow');
+    if (win.style.display === 'flex') {
+        win.style.display = 'none';
+    } else {
+        win.style.display = 'flex';
+        loadStaffChatHistory();
+    }
+}
+
+// 2. טעינת משתמשים (נציגים/מנהלים)
+async function loadStaffUsers() {
+    try {
+        const res = await fetch('/api/staff/users');
+        const users = await res.json();
+        const sel = document.getElementById('staffChatRecipient');
+        if (sel) {
+            sel.innerHTML = '<option value="all">📢 לכולם</option>';
+            users.forEach(u => {
+                if(u.id != userId) {
+                    const opt = document.createElement('option');
+                    opt.value = u.id;
+                    opt.innerText = `${u.username} (${u.role})`;
+                    sel.appendChild(opt);
+                }
+            });
+        }
+    } catch(e){}
+}
+
+// 3. טעינת היסטוריה
+async function loadStaffChatHistory() {
+    const container = document.getElementById('staffChatBody');
+    if(!container) return;
+
+    try {
+        const res = await fetch(`/api/staff/history?userId=${userId}`);
+        const msgs = await res.json();
+
+        container.innerHTML = msgs.map(m => {
+            const isMe = m.sender_id == userId;
+            const cls = isMe ? 'mine' : 'others';
+            let fileHtml = '';
+            if(m.file_path) {
+                fileHtml = `<a href="/staff-files/${m.file_path}" target="_blank" class="staff-file-link">📎 ${m.file_name || 'קובץ'}</a>`;
+            }
+            return `
+            <div class="staff-msg ${cls}">
+                <small>${m.sender_name}</small>
+                <div>${m.message}</div>
+                ${fileHtml}
+            </div>`;
+        }).join('');
+        container.scrollTop = container.scrollHeight;
+    } catch(e){}
+}
+
+// 4. שליחת הודעה + קובץ
+async function sendStaffMessage() {
+    const msg = document.getElementById('staffChatMsg').value;
+    const recipient = document.getElementById('staffChatRecipient').value;
+    const fileInput = document.getElementById('staffChatFile');
+
+    if(!msg && !fileInput.files.length) return;
+
+    const fd = new FormData();
+    fd.append('sender_id', userId);
+    fd.append('recipient_id', recipient);
+    fd.append('message', msg);
+    if(fileInput.files[0]) fd.append('file', fileInput.files[0]);
+
+    try {
+        await fetch('/api/staff/send', { method: 'POST', body: fd });
+        document.getElementById('staffChatMsg').value = '';
+        fileInput.value = '';
+        loadStaffChatHistory();
+    } catch(e) { alert('שגיאה בשליחה'); }
+}
+
+// --- יומן משימות ---
 function openUserCalendar() {
     const modal = document.getElementById('calendarModal');
     const container = document.getElementById('calendarContainer');
 
     modal.style.display = 'flex';
-    container.innerHTML = "";
-    const calendarEl = document.createElement('div');
-    calendarEl.style.height = '100%';
-    container.appendChild(calendarEl);
+    container.innerHTML = '';
 
     setTimeout(() => {
-        var calendar = new FullCalendar.Calendar(calendarEl, {
-            initialView: 'dayGridMonth',
+        new FullCalendar.Calendar(container, {
+            initialView: 'listWeek',
             locale: 'he',
             direction: 'rtl',
             height: '100%',
-            headerToolbar: {
-                left: 'prev,next today',
-                center: 'title',
-                right: 'dayGridMonth,listWeek'
-            },
-            events: `/api/meetings?role=user&userId=${userId}`,
-            eventClick: function(info) {
-                const p = info.event.extendedProps;
-                alert(`📌 פגישה: ${info.event.title}\n👤 דייר: ${p.name || '?'}\n📞 טלפון: ${p.phone || '-'}\n📍 כתובת: ${p.address || '-'}`);
-            }
-        });
-        calendar.render();
+            headerToolbar: { left: 'prev,next', center: 'title', right: 'listWeek,dayGridMonth' },
+            events: `/api/tasks?userId=${userId}`
+        }).render();
     }, 100);
 }
 
-// --- טעינת רשימת בניינים ודאשבורד ---
-async function loadMyBuildings() {
-    const container = document.getElementById('myBuildings');
-    container.innerHTML = '<p>טוען...</p>';
-
-    // איפוס חיפוש
-    const searchInput = document.getElementById('searchInput');
-    if(searchInput) searchInput.value = '';
-
-    try {
-        const res = await fetch(`/my-buildings?userId=${userId}`);
-        const buildings = await res.json();
-
-        if (buildings.length === 0) {
-            container.innerHTML = '<p>אין לך כתובות משויכות.</p>';
-            return;
-        }
-
-        container.innerHTML = buildings.map(b => `
-            <div class="card" style="padding:15px; border:1px solid #ddd; margin-bottom:15px;">
-                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
-                    <div>
-                        <h3 style="margin:0; color:#2563eb;">${b.project_name}</h3>
-                        <div style="font-size:0.95rem;">${b.address} (מתחם ${b.complex_name})</div>
-                    </div>
-                    <button onclick="openResidentList('${encodeURIComponent(b.project_name)}', '${encodeURIComponent(b.address)}')" style="background:#3b82f6; width:auto; padding:8px 15px;">הצג דיירים</button>
-                </div>
-                
-                <div style="background:#f8fafc; padding:10px; border-radius:8px; font-size:0.85rem;">
-                    <strong>סטטוס מתחם:</strong>
-                    <div style="display:flex; height:12px; background:#e5e7eb; border-radius:6px; overflow:hidden; margin:5px 0;">
-                        <div style="width:${b.stats.full_pct}%; background:#10b981;" title="מלא ${b.stats.full_pct}%"></div>
-                        <div style="width:${b.stats.partial_pct}%; background:#f59e0b;" title="חלקי ${b.stats.partial_pct}%"></div>
-                        <div style="width:${b.stats.refused_pct}%; background:#ef4444;" title="סרבן ${b.stats.refused_pct}%"></div>
-                    </div>
-                    <div style="display:flex; gap:10px;">
-                        <span style="color:#166534">● מלא: ${b.stats.full_pct}%</span>
-                        <span style="color:#b45309">● חלקי: ${b.stats.partial_pct}%</span>
-                        <span style="color:#991b1b">● סרבנים: ${b.stats.refused_pct}%</span>
-                    </div>
-                </div>
-            </div>`).join('');
-    } catch (e) { container.innerHTML = '<p style="color:red">שגיאה בטעינת נתונים</p>'; }
-}
-
-// --- פתיחת רשימת דיירים בבניין ---
-async function openResidentList(encodedProject, encodedAddress) {
-    const project = decodeURIComponent(encodedProject);
-    const address = decodeURIComponent(encodedAddress);
-
-    currentProject = project;
-    currentAddress = address;
-
-    const modal = document.getElementById('detailsModal');
-    if(modal) modal.style.display = 'flex';
-
-    document.getElementById('modalTitle').textContent = `${project} - ${address}`;
-    const content = document.getElementById('modalContent');
-    content.innerHTML = '<p style="text-align:center;">טוען דיירים...</p>';
-
-    try {
-        const res = await fetch(`/residents-by-address?project=${encodedProject}&address=${encodedAddress}`);
-        const residents = await res.json();
-
-        if(residents.length === 0) {
-            content.innerHTML = '<p>לא נמצאו דיירים בכתובת זו.</p>';
-            return;
-        }
-
-        content.innerHTML = residents.map(r => {
-            const safeR = JSON.stringify(r).replace(/'/g, "&#39;").replace(/"/g, "&quot;");
-
-            // צבע סטטוס
-            const isSigned = r.status.includes('חתם') || r.status === 'ענה ונקבע פגישה';
-            const statusStyle = isSigned ? 'background:#dcfce7; color:#166534; font-weight:bold; padding:2px 8px; border-radius:10px;' : 'background:#f1f5f9; padding:2px 8px; border-radius:10px;';
-
-            return `
-            <div class="resident-list-item" onclick='openClientCard(${safeR})' style="display:flex; justify-content:space-between; padding:12px; border-bottom:1px solid #eee; cursor:pointer;">
-                <div>
-                    <b>${r.name}</b> 
-                    <small>| דירה ${r.sub_parcel}</small>
-                    ${r.warning_note !== 'לא' ? '<span style="color:red; font-weight:bold;"> (⚠️ אזהרה)</span>' : ''}
-                </div>
-                <div style="${statusStyle}">${r.status}</div>
-            </div>`;
-        }).join('');
-    } catch(e) {
-        content.innerHTML = '<p>שגיאה בטעינת הרשימה</p>';
+function searchResidents() {
+    const term = prompt("חיפוש דייר (שם או תעודת זהות):");
+    if(term) {
+        alert("פונקציונליות חיפוש מתקדמת תתווסף בהמשך. כרגע ניתן לנווט ידנית.");
     }
-}
-
-// --- כרטיס דייר (עריכה) ---
-function openClientCard(r) {
-    const content = document.getElementById('modalContent');
-    const statusOpts = ["ללא מענה", "ענה ונקבע פגישה", "סרבן", "לא מעוניין", "בבדיקה"];
-    const isRenter = r.is_renter === 'כן';
-
-    // בדיקה אם התיק ננעל ע"י עו"ד
-    const isLocked = (r.lawyer_status === 'חתם מלא' || r.lawyer_status === 'חתם חלקי');
-    const disabled = isLocked ? 'disabled' : '';
-
-    // צ'ק ליסט לקריאה בלבד
-    const checklist = JSON.parse(r.doc_checklist || '{}');
-    const reqDocs = ['תעודת זהות', 'נסח טאבו', 'יפוי כוח', 'אישור זכויות', 'מסמכי בנק'];
-    let docsHtml = '<div style="margin-top:5px; font-size:0.8rem; display:flex; gap:10px; flex-wrap:wrap;">';
-    reqDocs.forEach(doc => { if(checklist[doc]) docsHtml += `<span style="color:green">✅ ${doc}</span>`; });
-    docsHtml += '</div>';
-
-    const agentsOptions = allAgents.map(a => `<option value="${a.id}" ${a.id == r.assigned_user_id ? 'selected' : ''}>${a.username}</option>`).join('');
-
-    content.innerHTML = `
-        <div class="client-card-grid">
-            <div class="form-group"><label>שם מלא</label><input type="text" value="${r.name}" readonly style="background:#eee;"></div>
-            
-            <div class="form-group">
-                <label>טלפון <button type="button" onclick="enablePhoneEdit()" style="background:none; border:none; color:blue; cursor:pointer; text-decoration:underline; font-size:0.8rem;">(מספר שגוי? לחץ לעדכון)</button></label>
-                <input type="text" id="client-phone" value="${r.phone}" readonly style="background:#eee; font-weight:bold;">
-                ${r.old_phone ? `<small style="color:red; display:block;">מספר מקורי מאקסל: ${r.old_phone}</small>` : ''}
-            </div>
-            
-            <div class="client-card-full" style="background:#f0fdf4; border:1px solid #bbf7d0; padding:10px; border-radius:8px; margin-bottom:10px;">
-                <label>📋 סטטוס עורך דין (מסמכים וחתימות):</label>
-                <div style="font-size:1.1rem; font-weight:bold;">${r.lawyer_status}</div>
-                ${docsHtml}
-                ${r.contract_file_path ? `<a href="/download-doc/${r.contract_file_path}" target="_blank" style="display:block; margin-top:5px; color:#166534; font-weight:bold;">📄 הורד חוזה חתום</a>` : ''}
-            </div>
-
-            <div class="form-group"><label>נציג מטפל:</label><select id="edit-agent">${agentsOptions}</select></div>
-
-            <div class="form-group"><label>הערת אזהרה (מאקסל):</label>
-                <input type="text" value="${r.warning_note}" readonly style="background:#fee2e2; color:#991b1b; font-weight:bold;">
-            </div>
-
-            <div class="client-card-full form-group" style="border-top:1px solid #eee; padding-top:10px;">
-                <label>📤 העלאת מסמכים:</label>
-                <div style="display:flex; gap:5px;">
-                    <select id="upload-type" style="flex:1;">
-                        <option value="תעודת זהות">תעודת זהות</option>
-                        <option value="נסח טאבו">נסח טאבו</option>
-                        <option value="יפוי כוח">יפוי כוח</option>
-                        <option value="אחר">אחר</option>
-                    </select>
-                    <input type="file" id="upload-file" style="flex:1;">
-                    <button onclick="uploadDoc(${r.id})" style="width:auto; background:#8b5cf6;">העלה</button>
-                </div>
-            </div>
-
-            <div class="form-group"><label>האם מושכר?</label>
-                <select id="edit-rent" onchange="toggleRenterFields()"><option value="לא" ${!isRenter?'selected':''}>לא</option><option value="כן" ${isRenter?'selected':''}>כן</option></select>
-            </div>
-            
-            <div id="renter-fields" class="client-card-full" style="display:${isRenter?'grid':'none'}; grid-template-columns: 1fr 1fr; gap:10px; background:#fffbe6; padding:10px;">
-                <div><label>שם השוכר</label><input type="text" id="edit-renter-name" value="${r.renter_name||''}"></div>
-                <div><label>טלפון שוכר</label><input type="text" id="edit-renter-phone" value="${r.renter_phone||''}"></div>
-            </div>
-
-            <div class="client-card-full form-group"><label>סטטוס טיפול (נציג)</label>
-                <select id="edit-status" onchange="toggleMeetingArea()" ${disabled} style="font-weight:bold; border:2px solid blue; padding:8px;">
-                    ${statusOpts.map(o=>`<option value="${o}" ${r.status===o?'selected':''}>${o}</option>`).join('')}
-                </select>
-                ${isLocked ? '<small style="color:red; display:block;">⚠ התיק ננעל ע"י עורך הדין (נחתם)</small>' : ''}
-            </div>
-            
-            <div id="meeting-area" class="meeting-area client-card-full" style="display:none; background:#eff6ff; padding:15px; border-radius:8px;">
-                <label style="color:#1e40af; font-weight:bold;">📅 קביעת פגישה חדשה</label>
-                <div style="display:flex; gap:10px; margin-top:5px;">
-                    <input type="datetime-local" id="edit-date" style="background:#fff;">
-                    <select id="edit-meeting-type" style="background:#fff;">
-                        <option value="agent">עבורי (החתמה)</option>
-                        <option value="lawyer">עבור עורך דין</option>
-                    </select>
-                </div>
-            </div>
-
-            <div class="client-card-full form-group"><label>הערות</label><textarea id="edit-note" rows="3">${r.note||''}</textarea></div>
-        </div>
-        
-        <div style="display:flex; gap:10px; margin-top:15px; border-top:1px solid #ccc; padding-top:15px;">
-            <button onclick="saveClientCard(${r.id}, '${r.project_name.replace(/'/g, "\\'")}', '${r.name.replace(/'/g, "\\'")}')" style="flex:2; background:#10b981; font-size:1.1rem;">💾 שמור שינויים</button>
-            <button onclick="openResidentList('${encodeURIComponent(currentProject)}', '${encodeURIComponent(currentAddress)}')" style="flex:1; background:#6b7280;">חזור</button>
-        </div>
-    `;
-    toggleMeetingArea();
-}
-
-function enablePhoneEdit() {
-    const el = document.getElementById('client-phone');
-    el.readOnly = false;
-    el.style.background = '#fff';
-    el.style.border = '2px solid red';
-    el.focus();
-}
-
-function toggleRenterFields() {
-    const isRenter = document.getElementById('edit-rent').value === 'כן';
-    document.getElementById('renter-fields').style.display = isRenter ? 'grid' : 'none';
-}
-
-function toggleMeetingArea() {
-    const status = document.getElementById('edit-status').value;
-    const area = document.getElementById('meeting-area');
-    area.style.display = (status === 'ענה ונקבע פגישה') ? 'block' : 'none';
-}
-
-async function uploadDoc(residentId) {
-    const fileInput = document.getElementById('upload-file');
-    const docType = document.getElementById('upload-type').value;
-    if (!fileInput.files.length) return alert('בחר קובץ');
-
-    const formData = new FormData();
-    formData.append('doc', fileInput.files[0]);
-    formData.append('resident_id', residentId);
-    formData.append('doc_type', docType);
-    formData.append('uploaded_by_role', 'user');
-
-    try {
-        const res = await fetch('/upload-resident-doc', { method: 'POST', body: formData });
-        if(res.ok) alert('המסמך הועלה בהצלחה!'); else alert('שגיאה בהעלאה');
-    } catch(e) { alert('תקלה בתקשורת'); }
-}
-
-async function saveClientCard(id, projectName, residentName) {
-    const status = document.getElementById('edit-status').value;
-    const note = document.getElementById('edit-note').value;
-    const agentId = document.getElementById('edit-agent').value;
-    const isRenter = document.getElementById('edit-rent').value;
-    const renterName = document.getElementById('edit-renter-name').value;
-    const renterPhone = document.getElementById('edit-renter-phone').value;
-    const phone = document.getElementById('client-phone').value;
-
-    const meetingDate = document.getElementById('edit-date').value;
-    const meetingType = document.getElementById('edit-meeting-type').value;
-
-    try {
-        await fetch('/update-resident-data', {
-            method: 'POST', headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({
-                id, userId: agentId, status, note,
-                is_renter: isRenter, renter_name: renterName, renter_phone: renterPhone,
-                phone: phone, current_address: currentAddress
-            })
-        });
-
-        if (status === "ענה ונקבע פגישה") {
-            if (!meetingDate) { alert('נא לבחור תאריך לפגישה!'); return; }
-            await fetch('/schedule-meeting', {
-                method: 'POST', headers: {'Content-Type':'application/json'},
-                body: JSON.stringify({ resident_id: id, user_id: userId, project_name: projectName, resident_name: residentName, start_time: meetingDate, meeting_type: meetingType })
-            });
-            const cleanPhone = phone.replace(/\D/g, '');
-            if (cleanPhone) window.open(`https://wa.me/972${cleanPhone.substring(1)}?text=${encodeURIComponent('נקבעה פגישה לתאריך ' + new Date(meetingDate).toLocaleString())}`, '_blank');
-            alert('פגישה נקבעה!');
-        } else {
-            alert('הנתונים עודכנו בהצלחה!');
-        }
-
-        openResidentList(encodeURIComponent(currentProject), encodeURIComponent(currentAddress));
-
-    } catch (e) {
-        alert('שגיאה בתקשורת עם השרת');
-    }
-}
-
-async function searchResidents() {
-    const q = document.getElementById('searchInput').value;
-    if(!q) return loadMyBuildings();
-
-    const container = document.getElementById('myBuildings');
-    container.innerHTML = 'מחפש...';
-
-    try {
-        const res = await fetch(`/api/search?q=${encodeURIComponent(q)}&role=user&userId=${userId}`);
-        const results = await res.json();
-
-        if (results.length === 0) { container.innerHTML = '<p>לא נמצאו תוצאות.</p>'; return; }
-
-        container.innerHTML = `<h4>תוצאות חיפוש:</h4>` + results.map(r => {
-            const safeR = JSON.stringify(r).replace(/'/g, "&#39;").replace(/"/g, "&quot;");
-            return `
-            <div class="resident-list-item" onclick='openClientCard(${safeR})' style="padding:10px; border-bottom:1px solid #ccc; cursor:pointer;">
-                <div><b>${r.name}</b> <small>${r.current_address}</small></div>
-                <div>${r.status}</div>
-            </div>`;
-        }).join('');
-    } catch(e) { container.innerHTML = 'שגיאה בחיפוש'; }
 }
